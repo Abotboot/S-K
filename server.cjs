@@ -155,7 +155,7 @@ app.get('/safe', async (req, res) => {
 });
 
 // --- DASHBOARD (EMBEDDED HTML) ---
-// Note: Dashboard HTML logic remains mostly same, just fetching from updated API
+// Note: Dashboard HTML logic updated to show errors
 const DASHBOARD_HTML = `
 <!DOCTYPE html>
 <html lang="en">
@@ -213,9 +213,24 @@ const DASHBOARD_HTML = `
             const headers = { 'Content-Type': 'application/json', 'Authorization': authToken };
             const opts = { method, headers };
             if (body) opts.body = JSON.stringify(body);
-            const res = await fetch('/api'+endpoint, opts);
-            if (res.status === 403) { alert("Invalid Password"); document.getElementById('loginScreen').style.display='flex'; document.getElementById('dashboard').style.display='none'; return null; }
-            return res.json();
+            try {
+                const res = await fetch('/api'+endpoint, opts);
+                if (res.status === 403) { 
+                    alert("Invalid Password"); 
+                    document.getElementById('loginScreen').style.display='flex'; 
+                    document.getElementById('dashboard').style.display='none'; 
+                    return null; 
+                }
+                const data = await res.json();
+                if (data.error) {
+                    alert("Server Error: " + data.error);
+                    return null;
+                }
+                return data;
+            } catch(e) {
+                alert("Connection Failed: " + e.message);
+                return null;
+            }
         }
         async function fetchKeys() {
             const data = await api('/keys');
@@ -227,8 +242,8 @@ const DASHBOARD_HTML = `
             }
         }
         async function createKey() {
-            await api('/create', 'POST', { days: document.getElementById('daysInput').value, note: document.getElementById('noteInput').value });
-            fetchKeys();
+            const res = await api('/create', 'POST', { days: document.getElementById('daysInput').value, note: document.getElementById('noteInput').value });
+            if (res && res.success) { fetchKeys(); }
         }
         async function resetHWID(key) { if(confirm('Reset HWID?')) { await api('/reset', 'POST', { key }); fetchKeys(); } }
         async function deleteKey(key) { if(confirm('Delete Key?')) { await api('/delete', 'POST', { key }); fetchKeys(); } }
