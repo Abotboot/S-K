@@ -19,9 +19,17 @@ if (!MONGO_URI) {
     console.error("❌ CRITICAL ERROR: MONGO_URI is missing from Environment Variables!");
     console.error("   Please add it in Render Dashboard -> Environment Variables.");
 } else {
-    mongoose.connect(MONGO_URI)
-        .then(() => console.log("✅ Connected to MongoDB Atlas"))
-        .catch(err => console.error("❌ MongoDB Connection Error:", err));
+    // Added options for better stability and debugging
+    mongoose.connect(MONGO_URI, {
+        serverSelectionTimeoutMS: 5000 // Fail faster if IP is blocked so logs show it immediately
+    })
+    .then(() => console.log("✅ Connected to MongoDB Atlas"))
+    .catch(err => {
+        console.error("❌ MongoDB Connection Error:", err);
+        console.error("💡 HINT: Did you add 0.0.0.0/0 to MongoDB Network Access?");
+    });
+    
+    mongoose.connection.on('error', err => console.error("❌ DB Runtime Error:", err));
 }
 
 // --- DATABASE SCHEMA ---
@@ -52,6 +60,10 @@ const requireAuth = (req, res, next) => {
 
 // 1. Get All Keys
 app.get('/api/keys', requireAuth, async (req, res) => {
+    // Check connection status before trying to query
+    if (mongoose.connection.readyState !== 1) {
+        return res.status(500).json({ error: "Database not connected. Check Render Logs for 'MongoDB Connection Error'." });
+    }
     try {
         const keys = await Key.find({}).sort({ created_at: -1 });
         res.json(keys);
