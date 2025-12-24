@@ -1,44 +1,43 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const fs = require('fs');
 const path = require('path');
 const app = express();
 
-// --- RENDER COMPATIBILITY CONFIG ---
-// Render provides the PORT variable. We must use it.
+// --- CONFIGURATION ---
 const port = process.env.PORT || 3000;
-
-// Use environment variable for password if available, otherwise fallback to hardcoded
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Arn903_346"; 
-const KEYS_FILE = 'database.json';
+const MONGO_URI = process.env.MONGO_URI; 
 
-// Script Files (Ensure these exist in your folder)
+// Script Files
 const FILE_HEADLESS = 'headless.lua'; 
 const FILE_NORMAL   = 'read.lua';
 const FILE_SAFE     = 'safe.lua';
 
+// --- MONGODB CONNECTION ---
+if (!MONGO_URI) {
+    console.error("❌ CRITICAL ERROR: MONGO_URI is missing from Environment Variables!");
+    console.error("   Please add it in Render Dashboard -> Environment Variables.");
+} else {
+    mongoose.connect(MONGO_URI)
+        .then(() => console.log("✅ Connected to MongoDB Atlas"))
+        .catch(err => console.error("❌ MongoDB Connection Error:", err));
+}
+
+// --- DATABASE SCHEMA ---
+const keySchema = new mongoose.Schema({
+    key: { type: String, required: true, unique: true },
+    note: { type: String, default: "No Label" },
+    hwid: { type: String, default: null },
+    created_at: { type: Number, default: Date.now },
+    expires: { type: Number, required: true }
+});
+
+const Key = mongoose.model('Key', keySchema);
+
 // --- MIDDLEWARE ---
-app.use(express.json()); // Built-in body parser
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// --- DATABASE HELPERS ---
-// NOTE: On Render Free Tier, this file is "ephemeral". 
-// It will disappear if the server restarts or redeploys. 
-// For permanent storage, you would need a real database (like MongoDB/Postgres) or a Render Disk.
-function getKeys() {
-    if (!fs.existsSync(KEYS_FILE)) { 
-        fs.writeFileSync(KEYS_FILE, '[]'); 
-        return []; 
-    }
-    try { 
-        return JSON.parse(fs.readFileSync(KEYS_FILE)); 
-    } catch (e) { 
-        return []; 
-    }
-}
-
-function saveKeys(keys) {
-    fs.writeFileSync(KEYS_FILE, JSON.stringify(keys, null, 2));
-}
 
 // --- AUTH MIDDLEWARE ---
 const requireAuth = (req, res, next) => {
@@ -52,62 +51,51 @@ const requireAuth = (req, res, next) => {
 // --- API ROUTES (ADMIN) ---
 
 // 1. Get All Keys
-app.get('/api/keys', requireAuth, (req, res) => {
-    res.json(getKeys());
+app.get('/api/keys', requireAuth, async (req, res) => {
+    try {
+        const keys = await Key.find({}).sort({ created_at: -1 });
+        res.json(keys);
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 2. Create Key (With Custom Days & Note)
-app.post('/api/create', requireAuth, (req, res) => {
-    const { days, note } = req.body;
-    const durationDays = parseInt(days) || 30; // Default to 30 if invalid
+// 2. Create Key
+app.post('/api/create', requireAuth, async (req, res) => {
+    try {
+        const { days, note } = req.body;
+        const durationDays = parseInt(days) || 30;
 
-    const newKey = {
-        key: "KEY_" + Math.random().toString(36).substr(2, 8).toUpperCase(),
-        note: note || "No Label",
-        hwid: null,
-        created_at: Date.now(),
-        expires: Date.now() + (durationDays * 24 * 60 * 60 * 1000)
-    };
+        const newKey = await Key.create({
+            key: "KEY_" + Math.random().toString(36).substr(2, 8).toUpperCase(),
+            note: note || "No Label",
+            expires: Date.now() + (durationDays * 24 * 60 * 60 * 1000)
+        });
 
-    const keys = getKeys();
-    keys.push(newKey);
-    saveKeys(keys);
-
-    res.json({ success: true, key: newKey });
+        res.json({ success: true, key: newKey });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // 3. Reset HWID
-app.post('/api/reset', requireAuth, (req, res) => {
-    const { key } = req.body;
-    let keys = getKeys();
-    const keyIndex = keys.findIndex(k => k.key === key);
-
-    if (keyIndex !== -1) {
-        keys[keyIndex].hwid = null;
-        saveKeys(keys);
-        res.json({ success: true });
-    } else {
-        res.status(404).json({ error: "Key not found" });
-    }
+app.post('/api/reset', requireAuth, async (req, res) => {
+    try {
+        const { key } = req.body;
+        const updated = await Key.findOneAndUpdate({ key: key }, { hwid: null }, { new: true });
+        if (updated) res.json({ success: true });
+        else res.status(404).json({ error: "Key not found" });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // 4. Delete Key
-app.post('/api/delete', requireAuth, (req, res) => {
-    const { key } = req.body;
-    let keys = getKeys();
-    const newKeys = keys.filter(k => k.key !== key); // Filter out the specific key
-
-    if (keys.length !== newKeys.length) {
-        saveKeys(newKeys);
+app.post('/api/delete', requireAuth, async (req, res) => {
+    try {
+        const { key } = req.body;
+        await Key.findOneAndDelete({ key: key });
         res.json({ success: true });
-    } else {
-        res.status(404).json({ error: "Key not found" });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- SCRIPT DELIVERY LOGIC ---
 
-function validateKey(req, res) {
+async function validateKey(req, res) {
     const { key, hwid } = req.query;
 
     const MSG_DENIED  = `<h1>⛔ ACCESS DENIED</h1><p>Invalid Key or missing parameters.</p>`;
@@ -116,30 +104,36 @@ function validateKey(req, res) {
 
     if (!key || !hwid) { res.status(403).send(MSG_DENIED); return false; }
 
-    const keys = getKeys();
-    const kData = keys.find(k => k.key === key);
+    try {
+        const kData = await Key.findOne({ key: key });
 
-    if (!kData) { res.status(403).send(MSG_DENIED); return false; }
+        if (!kData) { res.status(403).send(MSG_DENIED); return false; }
 
-    if (Date.now() > kData.expires) { 
-        res.status(403).send(MSG_EXPIRED); 
-        return false; 
-    }
+        if (Date.now() > kData.expires) { 
+            res.status(403).send(MSG_EXPIRED); 
+            return false; 
+        }
 
-    if (!kData.hwid) {
-        kData.hwid = hwid; // Lock to first HWID
-        saveKeys(keys);
-    } else if (kData.hwid !== hwid) {
-        res.status(403).send(MSG_LOCKED);
+        // Logic: If no HWID, set it. If HWID exists, check match.
+        if (!kData.hwid) {
+            kData.hwid = hwid;
+            await kData.save();
+        } else if (kData.hwid !== hwid) {
+            res.status(403).send(MSG_LOCKED);
+            return false;
+        }
+
+        return true;
+    } catch (e) {
+        console.error(e);
+        res.status(500).send("Database Error");
         return false;
     }
-
-    return true;
 }
 
-// Lua Script Routes
-app.get('/headless', (req, res) => {
-    if (!validateKey(req, res)) return;
+// Lua Script Routes (Now Async)
+app.get('/headless', async (req, res) => {
+    if (!await validateKey(req, res)) return;
     if (!fs.existsSync(FILE_HEADLESS)) return res.send("print('Error: Server missing headless.lua')");
     try {
         let lua = fs.readFileSync(FILE_HEADLESS, 'utf8');
@@ -148,19 +142,20 @@ app.get('/headless', (req, res) => {
     } catch (e) { res.send("print('Error reading file')"); }
 });
 
-app.get('/script', (req, res) => {
-    if (!validateKey(req, res)) return;
+app.get('/script', async (req, res) => {
+    if (!await validateKey(req, res)) return;
     if (fs.existsSync(FILE_NORMAL)) res.send(fs.readFileSync(FILE_NORMAL, 'utf8'));
     else res.send("print('Error: read.lua missing')");
 });
 
-app.get('/safe', (req, res) => {
-    if (!validateKey(req, res)) return;
+app.get('/safe', async (req, res) => {
+    if (!await validateKey(req, res)) return;
     if (fs.existsSync(FILE_SAFE)) res.send(fs.readFileSync(FILE_SAFE, 'utf8'));
     else res.send("print('Error: safe.lua missing')");
 });
 
 // --- DASHBOARD (EMBEDDED HTML) ---
+// Note: Dashboard HTML logic remains mostly same, just fetching from updated API
 const DASHBOARD_HTML = `
 <!DOCTYPE html>
 <html lang="en">
@@ -197,7 +192,7 @@ const DASHBOARD_HTML = `
     </div>
     <div id="dashboard" class="dashboard">
         <div style="display:flex;justify-content:space-between;align-items:center;">
-            <h2>⚡ Key Manager</h2>
+            <h2>⚡ Key Manager (MongoDB)</h2>
             <button onclick="logout()">Logout</button>
         </div>
         <div class="controls">
@@ -261,7 +256,6 @@ const DASHBOARD_HTML = `
 app.get('/admin', (req, res) => res.send(DASHBOARD_HTML));
 
 // --- SERVER START ---
-// RENDER FIX: Listen on 0.0.0.0 (implied) and use the dynamic PORT
 app.listen(port, () => {
     console.log("Server Online!");
     console.log("Listening on port: " + port);
