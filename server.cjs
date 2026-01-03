@@ -13,15 +13,15 @@ const MONGO_URI = process.env.MONGO_URI;
 const FILE_HEADLESS = 'headless.lua'; 
 const FILE_NORMAL   = 'read.lua';
 const FILE_SAFE     = 'safe.lua';
+const FILE_CHAINSAW = 'chainsaw.lua'; 
 
 // --- MONGODB CONNECTION ---
 if (!MONGO_URI) {
     console.error("❌ CRITICAL ERROR: MONGO_URI is missing from Environment Variables!");
     console.error("   Please add it in Render Dashboard -> Environment Variables.");
 } else {
-    // Added options for better stability and debugging
     mongoose.connect(MONGO_URI, {
-        serverSelectionTimeoutMS: 5000 // Fail faster if IP is blocked so logs show it immediately
+        serverSelectionTimeoutMS: 5000 
     })
     .then(() => console.log("✅ Connected to MongoDB Atlas"))
     .catch(err => {
@@ -60,7 +60,6 @@ const requireAuth = (req, res, next) => {
 
 // 1. Get All Keys
 app.get('/api/keys', requireAuth, async (req, res) => {
-    // Check connection status before trying to query
     if (mongoose.connection.readyState !== 1) {
         return res.status(500).json({ error: "Database not connected. Check Render Logs for 'MongoDB Connection Error'." });
     }
@@ -126,7 +125,6 @@ async function validateKey(req, res) {
             return false; 
         }
 
-        // Logic: If no HWID, set it. If HWID exists, check match.
         if (!kData.hwid) {
             kData.hwid = hwid;
             await kData.save();
@@ -143,7 +141,8 @@ async function validateKey(req, res) {
     }
 }
 
-// Lua Script Routes (Now Async)
+// --- LUA SCRIPT ROUTES ---
+
 app.get('/headless', async (req, res) => {
     if (!await validateKey(req, res)) return;
     if (!fs.existsSync(FILE_HEADLESS)) return res.send("print('Error: Server missing headless.lua')");
@@ -166,8 +165,19 @@ app.get('/safe', async (req, res) => {
     else res.send("print('Error: safe.lua missing')");
 });
 
+app.get('/chainsaw', async (req, res) => {
+    if (!await validateKey(req, res)) return;
+    if (fs.existsSync(FILE_CHAINSAW)) {
+        try {
+            let lua = fs.readFileSync(FILE_CHAINSAW, 'utf8');
+            res.send(lua);
+        } catch (e) { res.send("print('Error reading chainsaw.lua')"); }
+    } else {
+        res.send("print('Error: chainsaw.lua missing on server')");
+    }
+});
+
 // --- DASHBOARD (EMBEDDED HTML) ---
-// Note: Dashboard HTML logic updated to show errors
 const DASHBOARD_HTML = `
 <!DOCTYPE html>
 <html lang="en">
