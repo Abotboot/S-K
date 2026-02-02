@@ -1,0 +1,2168 @@
+
+-- // ANTI-DETECTION SETUP (OPTIONAL - Works without hookmetamethod) //
+local oldNamecall, oldIndex
+local HooksEnabled = false
+
+-- Try to setup hooks if available (not required for script to work)
+pcall(function()
+    if hookmetamethod and getnamecallmethod then
+        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = getnamecallmethod()
+            local args = {...}
+            
+            -- Block anti-cheat detection methods
+            if method == "CreateEvent" or method == "ClearEvent" then
+                if tostring(self):find("AntiCheat") then
+                    return nil
+                end
+            end
+            
+            -- Spoof character attribute checks
+            if method == "GetAttribute" then
+                local attrName = args[1]
+                if attrName == "Stunned" or attrName == "ElementalStunned" then
+                    if getgenv().SoloHunterSettings and getgenv().SoloHunterSettings.AntiStun then
+                        return false
+                    end
+                end
+            end
+            
+            return oldNamecall(self, ...)
+        end)
+        
+        oldIndex = hookmetamethod(game, "__index", function(self, key)
+            -- Spoof walkspeed/jumppower checks
+            local ok, isHumanoid = pcall(function() return self:IsA("Humanoid") end)
+            if ok and isHumanoid then
+                if key == "WalkSpeed" and getgenv().SoloHunterSettings then
+                    local settings = getgenv().SoloHunterSettings
+                    if settings.SpoofSpeed and settings.WalkSpeed > 16 then
+                        return 16
+                    end
+                end
+                if key == "JumpPower" and getgenv().SoloHunterSettings then
+                    local settings = getgenv().SoloHunterSettings
+                    if settings.SpoofJump and settings.JumpPower > 50 then
+                        return 50
+                    end
+                end
+            end
+            return oldIndex(self, key)
+        end)
+        
+        HooksEnabled = true
+    end
+end)
+
+-- // SERVICES //
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local CollectionService = game:GetService("CollectionService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+-- // GAME-SPECIFIC REFERENCES //
+local RepStorage = ReplicatedStorage:FindFirstChild("ReplicatedStorage")
+local RemoteServices = ReplicatedStorage:FindFirstChild("RemoteServices")
+
+-- Find remotes directly instead of using Comm
+local function FindRemote(serviceName, remoteName)
+    if not RemoteServices then return nil end
+    local serviceFolder = RemoteServices:FindFirstChild(serviceName)
+    if serviceFolder then
+        return serviceFolder:FindFirstChild(remoteName)
+    end
+    return nil
+end
+
+-- Store remote references
+local Remotes = {
+    Codes = RemoteServices and RemoteServices:FindFirstChild("CodesService"),
+}
+
+-- // LINORIA LOADER //
+local repo = "https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+
+-- // GLOBAL SETTINGS //
+getgenv().SoloHunterSettings = getgenv().SoloHunterSettings or {
+    -- Combat
+    AutoAttack = false,
+    AttackSpeed = 0.15,
+    AutoSkill = false,
+    SkillSlots = {["1"] = false, ["2"] = false, ["3"] = false, ["4"] = false, ["5"] = false},
+    SkillDelay = 0.5,
+    FireAnySkill = false,
+    SelectedSkill = "1",
+    InfiniteMana = false,
+    
+    -- Farming
+    AutoFarm = false,
+    FarmRadius = 100,
+    AutoChest = false,
+    ChestRadius = 150,
+    ChestHoldTime = 1.5,
+    AutoCollectDrops = false,
+    DropRadius = 50,
+    AutoQuest = false,
+    
+    -- Player
+    WalkSpeed = 16,
+    JumpPower = 50,
+    SpoofSpeed = true,
+    SpoofJump = true,
+    Noclip = false,
+    InfiniteJump = false,
+    AntiStun = false,
+    GodMode = false,
+    
+    -- Movement
+    FlyEnabled = false,
+    FlySpeed = 50,
+    
+    -- Teleport
+    ClickTP = false,
+    
+    -- ESP
+    ESPEnabled = false,
+    ESPPlayers = false,
+    ESPMobs = false,
+    ESPChests = false,
+    ESPNPCs = false,
+    ESPBosses = false,
+    ESPDistance = true,
+    ESPHealth = true,
+    ESPBoxes = false,
+    ESPTracers = false,
+    ESPUpdateRate = 0.5,
+    ESPMaxDistance = 500,
+    PlayerColor = Color3.fromRGB(255, 0, 0),
+    MobColor = Color3.fromRGB(255, 165, 0),
+    ChestColor = Color3.fromRGB(255, 255, 0),
+    BossColor = Color3.fromRGB(255, 0, 255),
+    
+    -- Target
+    AimLock = false,
+    TeamCheck = true,
+    CurrentTarget = nil,
+    
+    -- Dungeon
+    AutoDungeon = false,
+    AutoBoss = false,
+    AutoOpenGate = false,
+    SkipCutscenes = false,
+    BossAttackRange = 8,
+    CurrentDungeon = nil,
+    
+    -- Misc
+    AntiAFK = true,
+    AutoRedeem = false,
+    FPSBoost = false,
+}
+
+local Settings = getgenv().SoloHunterSettings
+
+-- // ESP STORAGE (Drawing API) //
+local ESPObjects = {}
+local ESPConnections = {}
+local ESPLastUpdate = 0
+local CachedMobs = {}
+local CachedBosses = {}
+local CachedChests = {}
+local LastCacheUpdate = 0
+
+-- // UTILITY FUNCTIONS //
+local function GetCharacter()
+    return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+end
+
+local function GetHumanoid()
+    local char = GetCharacter()
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+local function GetHumanoidRootPart()
+    local char = GetCharacter()
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function WorldToScreen(position)
+    local screenPos, onScreen = Camera:WorldToViewportPoint(position)
+    return Vector2.new(screenPos.X, screenPos.Y), onScreen, screenPos.Z
+end
+
+local function GetMobFolders()
+    local folders = {}
+    local possibleNames = {"Mobs", "Enemies", "NPCs", "Monsters", "Bosses", "CurrentRoom", "DungeonMobs"}
+    
+    for _, name in ipairs(possibleNames) do
+        local folder = Workspace:FindFirstChild(name)
+        if folder then
+            table.insert(folders, folder)
+        end
+    end
+    
+    -- Check for dungeon-specific mob folders
+    local dungeonFolder = Workspace:FindFirstChild("Dungeon") or Workspace:FindFirstChild("DungeonRoom")
+    if dungeonFolder then
+        for _, child in pairs(dungeonFolder:GetDescendants()) do
+            if child:IsA("Folder") and (child.Name:find("Mob") or child.Name:find("Enemy")) then
+                table.insert(folders, child)
+            end
+        end
+    end
+    
+    return folders
+end
+
+local function UpdateEntityCache()
+    if tick() - LastCacheUpdate < 1 then return end
+    LastCacheUpdate = tick()
+    
+    CachedMobs = {}
+    CachedBosses = {}
+    CachedChests = {}
+    
+    local myRoot = GetHumanoidRootPart()
+    if not myRoot then return end
+    
+    -- Cache mobs
+    local folders = GetMobFolders()
+    for _, folder in pairs(folders) do
+        for _, mob in pairs(folder:GetDescendants()) do
+            if mob:IsA("Model") then
+                local root = mob:FindFirstChild("HumanoidRootPart") or mob.PrimaryPart
+                local humanoid = mob:FindFirstChildOfClass("Humanoid")
+                if root and humanoid and humanoid.Health > 0 then
+                    local dist = (myRoot.Position - root.Position).Magnitude
+                    if dist < Settings.ESPMaxDistance then
+                        table.insert(CachedMobs, {Model = mob, Root = root, Humanoid = humanoid, Distance = dist})
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Cache bosses
+    local bossFolder = Workspace:FindFirstChild("Bosses") or Workspace:FindFirstChild("Boss")
+    local dungeonBoss = Workspace:FindFirstChild("CurrentBoss")
+    local searchFolders = {bossFolder, dungeonBoss}
+    
+    for _, folder in pairs(searchFolders) do
+        if folder then
+            local descendants = folder:IsA("Model") and {folder} or folder:GetDescendants()
+            for _, boss in pairs(descendants) do
+                if boss:IsA("Model") then
+                    local root = boss:FindFirstChild("HumanoidRootPart") or boss.PrimaryPart
+                    local humanoid = boss:FindFirstChildOfClass("Humanoid")
+                    if root and humanoid and humanoid.Health > 0 then
+                        table.insert(CachedBosses, {Model = boss, Root = root, Humanoid = humanoid})
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Also check tagged bosses
+    for _, boss in pairs(CollectionService:GetTagged("Boss")) do
+        if boss:IsA("Model") then
+            local root = boss:FindFirstChild("HumanoidRootPart") or boss.PrimaryPart
+            local humanoid = boss:FindFirstChildOfClass("Humanoid")
+            if root and humanoid and humanoid.Health > 0 then
+                local exists = false
+                for _, b in pairs(CachedBosses) do
+                    if b.Model == boss then exists = true break end
+                end
+                if not exists then
+                    table.insert(CachedBosses, {Model = boss, Root = root, Humanoid = humanoid})
+                end
+            end
+        end
+    end
+end
+
+local function IsNPC(model)
+    if not model then return false end
+    local name = model.Name:lower()
+    -- Skip NPCs like Hunter Tin, quest givers, shops, etc.
+    local npcKeywords = {"hunter", "tin", "quest", "shop", "merchant", "vendor", "npc", "guild", "master"}
+    for _, keyword in ipairs(npcKeywords) do
+        if name:find(keyword) then
+            return true
+        end
+    end
+    -- Check if in NPCs folder
+    local parent = model.Parent
+    while parent and parent ~= Workspace do
+        if parent.Name == "NPCs" then
+            return true
+        end
+        parent = parent.Parent
+    end
+    return false
+end
+
+local function GetNearestMob(maxDist, includeAllEnemies)
+    maxDist = maxDist or math.huge
+    local nearest, nearestDist = nil, maxDist
+    local myRoot = GetHumanoidRootPart()
+    if not myRoot then return nil end
+    
+    local folders = GetMobFolders()
+    
+    for _, folder in pairs(folders) do
+        -- Skip the NPCs folder entirely
+        if folder.Name == "NPCs" then continue end
+        
+        for _, mob in pairs(folder:GetDescendants()) do
+            if mob:IsA("Model") and not IsNPC(mob) then
+                local root = mob:FindFirstChild("HumanoidRootPart") or mob.PrimaryPart
+                local humanoid = mob:FindFirstChildOfClass("Humanoid")
+                
+                if root and humanoid and humanoid.Health > 0 then
+                    local dist = (myRoot.Position - root.Position).Magnitude
+                    if dist < nearestDist then
+                        nearest, nearestDist = mob, dist
+                    end
+                end
+            end
+        end
+    end
+    
+    return nearest, nearestDist
+end
+
+local function GetNearestBoss(maxDist)
+    maxDist = maxDist or math.huge
+    local nearest, nearestDist = nil, maxDist
+    local myRoot = GetHumanoidRootPart()
+    if not myRoot then return nil end
+    
+    local bossFolder = Workspace:FindFirstChild("Bosses") or Workspace:FindFirstChild("Boss")
+    local dungeonBoss = Workspace:FindFirstChild("CurrentBoss")
+    
+    local searchFolders = {bossFolder, dungeonBoss}
+    
+    for _, folder in pairs(searchFolders) do
+        if folder then
+            local descendants = folder:IsA("Model") and {folder} or folder:GetDescendants()
+            for _, boss in pairs(descendants) do
+                if boss:IsA("Model") and not IsNPC(boss) then
+                    local root = boss:FindFirstChild("HumanoidRootPart") or boss.PrimaryPart
+                    local humanoid = boss:FindFirstChildOfClass("Humanoid")
+                    
+                    if root and humanoid and humanoid.Health > 0 then
+                        local dist = (myRoot.Position - root.Position).Magnitude
+                        if dist < nearestDist then
+                            nearest, nearestDist = boss, dist
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Also check tagged bosses
+    for _, boss in pairs(CollectionService:GetTagged("Boss")) do
+        if boss:IsA("Model") and not IsNPC(boss) then
+            local root = boss:FindFirstChild("HumanoidRootPart") or boss.PrimaryPart
+            local humanoid = boss:FindFirstChildOfClass("Humanoid")
+            
+            if root and humanoid and humanoid.Health > 0 then
+                local dist = (myRoot.Position - root.Position).Magnitude
+                if dist < nearestDist then
+                    nearest, nearestDist = boss, dist
+                end
+            end
+        end
+    end
+    
+    return nearest, nearestDist
+end
+
+local function GetBossHitbox(boss)
+    if not boss then return nil end
+    local root = boss:FindFirstChild("HumanoidRootPart") or boss.PrimaryPart
+    if not root then return nil end
+    
+    -- Calculate boss size from all parts
+    local minPos, maxPos = Vector3.new(math.huge, math.huge, math.huge), Vector3.new(-math.huge, -math.huge, -math.huge)
+    for _, part in pairs(boss:GetDescendants()) do
+        if part:IsA("BasePart") then
+            local pos = part.Position
+            local size = part.Size / 2
+            minPos = Vector3.new(math.min(minPos.X, pos.X - size.X), math.min(minPos.Y, pos.Y - size.Y), math.min(minPos.Z, pos.Z - size.Z))
+            maxPos = Vector3.new(math.max(maxPos.X, pos.X + size.X), math.max(maxPos.Y, pos.Y + size.Y), math.max(maxPos.Z, pos.Z + size.Z))
+        end
+    end
+    
+    local center = (minPos + maxPos) / 2
+    local size = maxPos - minPos
+    return center, size
+end
+
+local function GetOptimalBossPosition(boss)
+    if not boss then return nil end
+    local root = boss:FindFirstChild("HumanoidRootPart") or boss.PrimaryPart
+    if not root then return nil end
+    
+    local center, size = GetBossHitbox(boss)
+    if not center then return root.Position + Vector3.new(0, 0, Settings.BossAttackRange) end
+    
+    -- Position player at attack range from boss center, on the ground level
+    local myRoot = GetHumanoidRootPart()
+    if myRoot then
+        local directionToPlayer = (myRoot.Position - center).Unit
+        directionToPlayer = Vector3.new(directionToPlayer.X, 0, directionToPlayer.Z).Unit
+        if directionToPlayer.Magnitude < 0.1 then
+            directionToPlayer = root.CFrame.LookVector * -1
+            directionToPlayer = Vector3.new(directionToPlayer.X, 0, directionToPlayer.Z).Unit
+        end
+        return center + (directionToPlayer * Settings.BossAttackRange) + Vector3.new(0, 3, 0)
+    end
+    
+    return center + Vector3.new(Settings.BossAttackRange, 3, 0)
+end
+
+local function GetNearestChest(maxDist)
+    maxDist = maxDist or math.huge
+    local nearest, nearestDist = nil, maxDist
+    local nearestPrompt = nil
+    local myRoot = GetHumanoidRootPart()
+    if not myRoot then return nil, nil end
+    
+    -- Search for proximity prompts on chests
+    for _, prompt in pairs(Workspace:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") and prompt.Enabled then
+            local parent = prompt.Parent
+            local name = parent.Name:lower()
+            if name:find("chest") or name:find("loot") or name:find("treasure") or name:find("crate") or name:find("serpent") then
+                local pos = parent:IsA("BasePart") and parent.Position or 
+                           (parent:IsA("Model") and parent.PrimaryPart and parent.PrimaryPart.Position) or
+                           (parent:IsA("Model") and parent:GetPivot().Position)
+                
+                if pos then
+                    local dist = (myRoot.Position - pos).Magnitude
+                    if dist < nearestDist then
+                        nearest, nearestDist = parent, dist
+                        nearestPrompt = prompt
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Also check workspace children directly for chest models (like SerpentChest)
+    for _, child in pairs(Workspace:GetChildren()) do
+        if child:IsA("Model") then
+            local name = child.Name:lower()
+            if name:find("chest") or name:find("serpent") then
+                local prompt = child:FindFirstChildOfClass("ProximityPrompt", true)
+                if prompt and prompt.Enabled then
+                    local pos = child:GetPivot().Position
+                    local dist = (myRoot.Position - pos).Magnitude
+                    if dist < nearestDist then
+                        nearest, nearestDist = child, dist
+                        nearestPrompt = prompt
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Also check for chest-tagged items
+    for _, chest in pairs(CollectionService:GetTagged("PlayerChest")) do
+        local prompt = chest:FindFirstChildOfClass("ProximityPrompt", true)
+        if prompt and prompt.Enabled then
+            local pos = chest:IsA("Model") and chest:GetPivot().Position or chest.Position
+            local dist = (myRoot.Position - pos).Magnitude
+            if dist < nearestDist then
+                nearest, nearestDist = chest, dist
+                nearestPrompt = prompt
+            end
+        end
+    end
+    
+    return nearest, nearestPrompt, nearestDist
+end
+
+local function GetNearestGate(maxDist, requireNearBoss)
+    maxDist = maxDist or 100
+    local nearest, nearestDist = nil, maxDist
+    local nearestPrompt = nil
+    local myRoot = GetHumanoidRootPart()
+    if not myRoot then return nil, nil end
+    
+    -- If requireNearBoss is true, only look for gates near boss areas
+    if requireNearBoss then
+        local boss, bossDist = GetNearestBoss(300)
+        if not boss then return nil, nil, nil end
+    end
+    
+    -- Search for gate/door/barrier PARTS (not just proximity prompts)
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        if obj:IsA("BasePart") or obj:IsA("Model") then
+            local name = obj.Name:lower()
+            
+            local isGate = name:find("gate") or name:find("door") or name:find("barrier") or 
+                          name:find("entrance") or name:find("wall") or name:find("block") or
+                          name:find("boss") and (name:find("room") or name:find("arena"))
+            
+            if isGate then
+                local pos = obj:IsA("BasePart") and obj.Position or 
+                           (obj:IsA("Model") and obj.PrimaryPart and obj.PrimaryPart.Position) or
+                           (obj:IsA("Model") and obj:GetPivot().Position)
+                
+                if pos then
+                    local dist = (myRoot.Position - pos).Magnitude
+                    if dist < nearestDist then
+                        nearest, nearestDist = obj, dist
+                        -- Check if it has a prompt
+                        nearestPrompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
+                    end
+                end
+            end
+        end
+    end
+    
+    return nearest, nearestPrompt, nearestDist
+end
+
+local function GetBossDoorPosition()
+    -- Find the area between player and boss that might have a door/gate
+    local boss, bossDist = GetNearestBoss(500)
+    if not boss then return nil end
+    
+    local bossRoot = boss:FindFirstChild("HumanoidRootPart") or boss.PrimaryPart
+    if not bossRoot then return nil end
+    
+    local myRoot = GetHumanoidRootPart()
+    if not myRoot then return nil end
+    
+    -- Look for gate/door objects between us and the boss
+    local bossPos = bossRoot.Position
+    local myPos = myRoot.Position
+    local midPoint = (bossPos + myPos) / 2
+    
+    local nearestGate, nearestDist = nil, 100
+    
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        if obj:IsA("BasePart") or obj:IsA("Model") then
+            local name = obj.Name:lower()
+            
+            if name:find("gate") or name:find("door") or name:find("barrier") or 
+               name:find("entrance") or name:find("trigger") then
+                local pos = obj:IsA("BasePart") and obj.Position or 
+                           (obj:IsA("Model") and obj:GetPivot().Position)
+                
+                if pos then
+                    -- Check if it's roughly between player and boss
+                    local distToMid = (pos - midPoint).Magnitude
+                    local distToBoss = (pos - bossPos).Magnitude
+                    
+                    if distToMid < 50 or distToBoss < 30 then
+                        if distToBoss < nearestDist then
+                            nearestGate = obj
+                            nearestDist = distToBoss
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    if nearestGate then
+        local pos = nearestGate:IsA("BasePart") and nearestGate.Position or nearestGate:GetPivot().Position
+        return pos
+    end
+    
+    -- If no gate found, return position closer to boss (might trigger door)
+    local direction = (bossPos - myPos).Unit
+    return myPos + direction * (bossDist * 0.7)
+end
+
+local function GetAllDrops()
+    local drops = {}
+    local dropFolders = {
+        Workspace:FindFirstChild("Drops"),
+        Workspace:FindFirstChild("ExpDrops"),
+        Workspace:FindFirstChild("Effects"),
+        Workspace:FindFirstChild("Loot"),
+    }
+    
+    for _, folder in pairs(dropFolders) do
+        if folder then
+            for _, drop in pairs(folder:GetChildren()) do
+                if drop:IsA("BasePart") or drop:IsA("Model") then
+                    table.insert(drops, drop)
+                end
+            end
+        end
+    end
+    
+    return drops
+end
+
+local function FindQuestNPC()
+    -- Check workspace.NPCs for Hunter Tin or quest-related NPCs
+    local npcsFolder = Workspace:FindFirstChild("NPCs")
+    if npcsFolder then
+        for _, npc in pairs(npcsFolder:GetChildren()) do
+            local name = npc.Name:lower()
+            if name:find("hunter") or name:find("quest") or name:find("tin") then
+                if npc:IsA("Model") then
+                    return npc:GetPivot().Position
+                elseif npc:IsA("BasePart") then
+                    return npc.Position
+                end
+            end
+        end
+    end
+    
+    -- Fallback: search all NPCs
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        local objName = obj.Name:lower()
+        if (objName:find("quest") or objName:find("hunter tin")) and obj:IsA("Model") then
+            return obj:GetPivot().Position
+        end
+    end
+    
+    return nil
+end
+
+local function FindLocationByName(name)
+    local searchTerms = {name:lower()}
+    
+    -- Special case for quest NPC
+    if name:lower() == "quest" then
+        return FindQuestNPC()
+    end
+    
+    -- Search in workspace
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        local objName = obj.Name:lower()
+        for _, term in pairs(searchTerms) do
+            if objName:find(term) then
+                if obj:IsA("BasePart") then
+                    return obj.Position
+                elseif obj:IsA("Model") then
+                    return obj:GetPivot().Position
+                end
+            end
+        end
+    end
+    
+    return nil
+end
+
+local function GetDungeonInfo()
+    local info = {
+        InDungeon = false,
+        DungeonName = "None",
+        CurrentRoom = 0,
+        TotalRooms = 0,
+        EnemiesRemaining = 0,
+        BossHealth = "N/A",
+        GateNearby = false,
+        BossReady = false,
+    }
+    
+    -- Check for dungeon indicators in PlayerGui
+    local PlayerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if PlayerGui then
+        local dungeonGui = PlayerGui:FindFirstChild("DungeonHud") or 
+                          PlayerGui:FindFirstChild("DungeonUI") or
+                          PlayerGui:FindFirstChild("DungeonInfo")
+        if dungeonGui then
+            info.InDungeon = true
+        end
+        
+        -- Also check for room indicators
+        for _, gui in pairs(PlayerGui:GetDescendants()) do
+            local name = gui.Name:lower()
+            if name:find("room") or name:find("wave") or name:find("floor") then
+                info.InDungeon = true
+                break
+            end
+        end
+    end
+    
+    -- Check workspace for dungeon room
+    local currentRoom = Workspace:FindFirstChild("CurrentRoom") or 
+                       Workspace:FindFirstChild("DungeonRoom") or
+                       Workspace:FindFirstChild("Room")
+    if currentRoom then
+        info.InDungeon = true
+        
+        -- Count enemies
+        local enemyCount = 0
+        for _, child in pairs(currentRoom:GetDescendants()) do
+            if child:IsA("Humanoid") and child.Health > 0 and child.Parent.Name ~= LocalPlayer.Name then
+                enemyCount += 1
+            end
+        end
+        info.EnemiesRemaining = enemyCount
+    end
+    
+    -- Check for boss
+    local boss, bossDist = GetNearestBoss()
+    if boss then
+        local humanoid = boss:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            info.BossHealth = string.format("%d/%d", math.floor(humanoid.Health), math.floor(humanoid.MaxHealth))
+            info.BossReady = true
+        end
+    end
+    
+    -- Check for gate nearby
+    local gate, gatePrompt, gateDist = GetNearestGate(50)
+    if gate then
+        info.GateNearby = true
+    end
+    
+    return info
+end
+
+local function FireSkill(slot)
+    local keyCode = Enum.KeyCode["One"]
+    if slot == "2" then keyCode = Enum.KeyCode.Two
+    elseif slot == "3" then keyCode = Enum.KeyCode.Three
+    elseif slot == "4" then keyCode = Enum.KeyCode.Four
+    elseif slot == "5" then keyCode = Enum.KeyCode.Five
+    elseif slot == "DashSlot" then keyCode = Enum.KeyCode.LeftShift
+    elseif slot == "WeaponSlot" then keyCode = Enum.KeyCode.E
+    end
+    
+    if VirtualInputManager then
+        VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
+        task.wait(0.05)
+        VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
+    end
+end
+
+local function TeleportTo(position)
+    local root = GetHumanoidRootPart()
+    if root and position then
+        root.CFrame = CFrame.new(position) + Vector3.new(0, 3, 0)
+    end
+end
+
+local function HoldProximityPrompt(prompt, duration)
+    if not prompt or not prompt.Parent then return end
+    duration = duration or prompt.HoldDuration or 1
+    
+    if fireproximityprompt then
+        -- Simulate holding by firing multiple times
+        local startTime = tick()
+        while tick() - startTime < duration and prompt and prompt.Parent and prompt.Enabled do
+            fireproximityprompt(prompt, 1)
+            task.wait(0.1)
+        end
+        if prompt and prompt.Parent then
+            fireproximityprompt(prompt, 0)
+        end
+    end
+end
+
+-- // ESP DRAWING API (Optimized) //
+local function CreateESPBox(color)
+    local box = Drawing.new("Quad")
+    box.Visible = false
+    box.Color = color
+    box.Thickness = 1
+    box.Filled = false
+    return box
+end
+
+local function CreateESPText(color)
+    local text = Drawing.new("Text")
+    text.Visible = false
+    text.Color = color
+    text.Size = 13
+    text.Center = true
+    text.Outline = true
+    text.OutlineColor = Color3.new(0, 0, 0)
+    return text
+end
+
+local function CreateESPTracer(color)
+    local tracer = Drawing.new("Line")
+    tracer.Visible = false
+    tracer.Color = color
+    tracer.Thickness = 1
+    return tracer
+end
+
+local function UpdateESPForObject(obj, objData)
+    if not obj or not obj.Parent then
+        if objData.Box then objData.Box:Remove() end
+        if objData.Text then objData.Text:Remove() end
+        if objData.Tracer then objData.Tracer:Remove() end
+        return false
+    end
+    
+    local root = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
+    local humanoid = obj:FindFirstChildOfClass("Humanoid")
+    
+    if not root then
+        objData.Box.Visible = false
+        objData.Text.Visible = false
+        objData.Tracer.Visible = false
+        return true
+    end
+    
+    local pos, onScreen, depth = WorldToScreen(root.Position)
+    local myRoot = GetHumanoidRootPart()
+    
+    if onScreen and myRoot and depth < Settings.ESPMaxDistance then
+        local dist = math.floor((myRoot.Position - root.Position).Magnitude)
+        local scale = 1 / depth * 1000
+        
+        local displayText = obj.Name
+        if Settings.ESPDistance then
+            displayText = displayText .. " [" .. dist .. "]"
+        end
+        if Settings.ESPHealth and humanoid then
+            displayText = displayText .. string.format(" (%d/%d)", math.floor(humanoid.Health), math.floor(humanoid.MaxHealth))
+        end
+        
+        objData.Text.Position = Vector2.new(pos.X, pos.Y - 30)
+        objData.Text.Text = displayText
+        objData.Text.Visible = true
+        
+        if Settings.ESPBoxes then
+            local boxSize = Vector2.new(scale * 2, scale * 3)
+            local topLeft = Vector2.new(pos.X - boxSize.X/2, pos.Y - boxSize.Y/2)
+            local topRight = Vector2.new(pos.X + boxSize.X/2, pos.Y - boxSize.Y/2)
+            local bottomLeft = Vector2.new(pos.X - boxSize.X/2, pos.Y + boxSize.Y/2)
+            local bottomRight = Vector2.new(pos.X + boxSize.X/2, pos.Y + boxSize.Y/2)
+            
+            objData.Box.PointA = topLeft
+            objData.Box.PointB = topRight
+            objData.Box.PointC = bottomRight
+            objData.Box.PointD = bottomLeft
+            objData.Box.Visible = true
+        else
+            objData.Box.Visible = false
+        end
+        
+        if Settings.ESPTracers then
+            objData.Tracer.From = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
+            objData.Tracer.To = pos
+            objData.Tracer.Visible = true
+        else
+            objData.Tracer.Visible = false
+        end
+    else
+        objData.Box.Visible = false
+        objData.Text.Visible = false
+        objData.Tracer.Visible = false
+    end
+    
+    return true
+end
+
+local function CleanupESP()
+    for key, data in pairs(ESPObjects) do
+        if data.Box then data.Box:Remove() end
+        if data.Text then data.Text:Remove() end
+        if data.Tracer then data.Tracer:Remove() end
+    end
+    ESPObjects = {}
+end
+
+-- // WINDOW CREATION //
+local Window = Library:CreateWindow({
+    Title = "Crsh Hub | Solo Hunters",
+    Center = true,
+    AutoShow = true,
+    TabPadding = 8,
+    MenuFadeTime = 0.2
+})
+
+-- // TABS //
+local Tabs = {
+    Combat = Window:AddTab("Combat"),
+    Farm = Window:AddTab("Farming"),
+    Player = Window:AddTab("Player"),
+    Teleport = Window:AddTab("Teleport"),
+    ESP = Window:AddTab("ESP"),
+    Dungeon = Window:AddTab("Dungeon"),
+    Misc = Window:AddTab("Misc"),
+    Settings = Window:AddTab("Settings"),
+}
+
+-- ========================================
+-- COMBAT TAB
+-- ========================================
+local CombatMain = Tabs.Combat:AddLeftGroupbox("Auto Combat")
+
+CombatMain:AddToggle("AutoAttack", {
+    Text = "Auto Attack (M1)",
+    Default = false,
+    Tooltip = "Clicks M1 on equipped tool automatically",
+    Callback = function(Value)
+        Settings.AutoAttack = Value
+    end
+})
+
+CombatMain:AddSlider("AttackSpeed", {
+    Text = "Attack Delay",
+    Default = 0.15,
+    Min = 0.05,
+    Max = 1,
+    Rounding = 2,
+    Callback = function(Value)
+        Settings.AttackSpeed = Value
+    end
+})
+
+CombatMain:AddToggle("AutoSkill", {
+    Text = "Auto Use Skills",
+    Default = false,
+    Tooltip = "Automatically uses selected skill slots",
+    Callback = function(Value)
+        Settings.AutoSkill = Value
+    end
+})
+
+CombatMain:AddSlider("SkillDelay", {
+    Text = "Skill Delay",
+    Default = 0.5,
+    Min = 0.1,
+    Max = 3,
+    Rounding = 1,
+    Callback = function(Value)
+        Settings.SkillDelay = Value
+    end
+})
+
+local SkillBox = Tabs.Combat:AddLeftGroupbox("Skill Slots")
+SkillBox:AddLabel("Enable slots to auto-fire with Auto Use Skills")
+
+for i = 1, 5 do
+    SkillBox:AddToggle("Skill" .. i, {
+        Text = "Skill " .. i .. " (Key " .. i .. ")",
+        Default = false,
+        Callback = function(Value)
+            Settings.SkillSlots[tostring(i)] = Value
+        end
+    })
+end
+
+local FireSkillBox = Tabs.Combat:AddRightGroupbox("Fire Skill")
+
+FireSkillBox:AddDropdown("SkillSelect", {
+    Values = {"1", "2", "3", "4", "5", "DashSlot", "WeaponSlot"},
+    Default = 1,
+    Text = "Select Skill",
+    Callback = function(Value)
+        Settings.SelectedSkill = Value
+    end
+})
+
+FireSkillBox:AddButton({
+    Text = "Fire Selected Skill",
+    Func = function()
+        FireSkill(Settings.SelectedSkill)
+        Library:Notify("Fired skill: " .. Settings.SelectedSkill, 1)
+    end
+})
+
+FireSkillBox:AddToggle("FireAnySkill", {
+    Text = "Auto Fire Selected Skill",
+    Default = false,
+    Callback = function(Value)
+        Settings.FireAnySkill = Value
+    end
+})
+
+local CombatEnhance = Tabs.Combat:AddRightGroupbox("Combat Enhancements")
+
+CombatEnhance:AddToggle("InfiniteMana", {
+    Text = "Infinite Mana (Spoof)",
+    Default = false,
+    Tooltip = "Spoofs mana checks (may not work on all abilities)",
+    Callback = function(Value)
+        Settings.InfiniteMana = Value
+    end
+})
+
+CombatEnhance:AddToggle("AntiStun", {
+    Text = "Anti Stun",
+    Default = false,
+    Tooltip = "Bypasses stun effects via hookmetamethod",
+    Callback = function(Value)
+        Settings.AntiStun = Value
+    end
+})
+
+CombatEnhance:AddToggle("AimLock", {
+    Text = "Face Nearest Enemy",
+    Default = false,
+    Callback = function(Value)
+        Settings.AimLock = Value
+    end
+})
+
+-- ========================================
+-- FARMING TAB
+-- ========================================
+local FarmMain = Tabs.Farm:AddLeftGroupbox("Auto Farm")
+
+FarmMain:AddToggle("AutoFarm", {
+    Text = "Auto Farm Mobs",
+    Default = false,
+    Tooltip = "Teleports to and attacks nearest mob",
+    Callback = function(Value)
+        Settings.AutoFarm = Value
+    end
+})
+
+FarmMain:AddSlider("FarmRadius", {
+    Text = "Farm Radius",
+    Default = 100,
+    Min = 10,
+    Max = 500,
+    Rounding = 0,
+    Callback = function(Value)
+        Settings.FarmRadius = Value
+    end
+})
+
+FarmMain:AddToggle("AutoChest", {
+    Text = "Auto Open Chests",
+    Default = false,
+    Tooltip = "Opens chests by holding proximity prompt",
+    Callback = function(Value)
+        Settings.AutoChest = Value
+    end
+})
+
+FarmMain:AddSlider("ChestRadius", {
+    Text = "Chest Radius",
+    Default = 150,
+    Min = 20,
+    Max = 500,
+    Rounding = 0,
+    Callback = function(Value)
+        Settings.ChestRadius = Value
+    end
+})
+
+FarmMain:AddSlider("ChestHoldTime", {
+    Text = "Chest Hold Time",
+    Default = 1.5,
+    Min = 0.5,
+    Max = 5,
+    Rounding = 1,
+    Tooltip = "How long to hold E on chests",
+    Callback = function(Value)
+        Settings.ChestHoldTime = Value
+    end
+})
+
+local DropBox = Tabs.Farm:AddLeftGroupbox("Drop Collection")
+
+DropBox:AddToggle("AutoCollectDrops", {
+    Text = "Auto Collect Drops",
+    Default = false,
+    Tooltip = "Collects EXP drops and loot via touch",
+    Callback = function(Value)
+        Settings.AutoCollectDrops = Value
+    end
+})
+
+DropBox:AddSlider("DropRadius", {
+    Text = "Drop Radius",
+    Default = 50,
+    Min = 10,
+    Max = 200,
+    Rounding = 0,
+    Callback = function(Value)
+        Settings.DropRadius = Value
+    end
+})
+
+
+
+local FarmQuest = Tabs.Farm:AddRightGroupbox("Quest")
+
+FarmQuest:AddToggle("AutoQuest", {
+    Text = "Auto Accept Quests",
+    Default = false,
+    Tooltip = "Accepts quests from NPCs automatically",
+    Callback = function(Value)
+        Settings.AutoQuest = Value
+    end
+})
+
+FarmQuest:AddButton({
+    Text = "TP to Quest NPC (Hunter Tin)",
+    Func = function()
+        local pos = FindQuestNPC()
+        if pos then
+            TeleportTo(pos)
+            Library:Notify("Teleported to Quest NPC!", 2)
+        else
+            -- Try workspace.NPCs["Hunter Tin"]
+            local npcs = Workspace:FindFirstChild("NPCs")
+            if npcs and npcs:FindFirstChild("Hunter Tin") then
+                local npc = npcs:FindFirstChild("Hunter Tin")
+                local npcPos = npc:IsA("Model") and npc:GetPivot().Position or npc.Position
+                TeleportTo(npcPos)
+                Library:Notify("Teleported to Hunter Tin!", 2)
+            else
+                Library:Notify("Quest NPC not found! Check workspace.NPCs", 2)
+            end
+        end
+    end
+})
+
+FarmQuest:AddLabel("Quest NPC: workspace.NPCs['Hunter Tin']")
+
+-- ========================================
+-- PLAYER TAB
+-- ========================================
+local PlayerMain = Tabs.Player:AddLeftGroupbox("Speed & Jump")
+
+PlayerMain:AddSlider("WalkSpeed", {
+    Text = "Walk Speed",
+    Default = 16,
+    Min = 16,
+    Max = 500,
+    Rounding = 0,
+    Callback = function(Value)
+        Settings.WalkSpeed = Value
+        local hum = GetHumanoid()
+        if hum then
+            hum.WalkSpeed = Value
+        end
+    end
+})
+
+PlayerMain:AddToggle("SpoofSpeed", {
+    Text = "Spoof Speed (Anti-Detect)",
+    Default = true,
+    Tooltip = "Makes server think your speed is normal",
+    Callback = function(Value)
+        Settings.SpoofSpeed = Value
+    end
+})
+
+PlayerMain:AddSlider("JumpPower", {
+    Text = "Jump Power",
+    Default = 50,
+    Min = 50,
+    Max = 500,
+    Rounding = 0,
+    Callback = function(Value)
+        Settings.JumpPower = Value
+        local hum = GetHumanoid()
+        if hum then
+            hum.JumpPower = Value
+        end
+    end
+})
+
+PlayerMain:AddToggle("SpoofJump", {
+    Text = "Spoof Jump (Anti-Detect)",
+    Default = true,
+    Callback = function(Value)
+        Settings.SpoofJump = Value
+    end
+})
+
+PlayerMain:AddToggle("InfiniteJump", {
+    Text = "Infinite Jump",
+    Default = false,
+    Callback = function(Value)
+        Settings.InfiniteJump = Value
+    end
+})
+
+local PlayerMisc = Tabs.Player:AddRightGroupbox("Misc")
+
+PlayerMisc:AddToggle("Noclip", {
+    Text = "Noclip",
+    Default = false,
+    Callback = function(Value)
+        Settings.Noclip = Value
+    end
+})
+
+PlayerMisc:AddToggle("GodMode", {
+    Text = "God Mode (Client)",
+    Default = false,
+    Tooltip = "Client-side only, may not work on all attacks",
+    Callback = function(Value)
+        Settings.GodMode = Value
+    end
+})
+
+local FlyBox = Tabs.Player:AddRightGroupbox("Flight")
+
+local FlyToggle = FlyBox:AddToggle("FlyEnabled", {
+    Text = "Enable Fly (Press F)",
+    Default = false,
+    Callback = function(Value)
+        Settings.FlyEnabled = Value
+        if not Value then
+            local hum = GetHumanoid()
+            if hum then hum.PlatformStand = false end
+            local root = GetHumanoidRootPart()
+            if root then
+                local bv = root:FindFirstChild("FlyBV")
+                local bg = root:FindFirstChild("FlyBG")
+                if bv then bv:Destroy() end
+                if bg then bg:Destroy() end
+            end
+        end
+    end
+})
+
+FlyToggle:AddKeyPicker("FlyKey", {
+    Default = "F",
+    Text = "Fly Toggle Key",
+    Mode = "Toggle",
+    Callback = function(Value)
+        Settings.FlyEnabled = Value
+        Toggles.FlyEnabled:SetValue(Value)
+    end
+})
+
+FlyBox:AddSlider("FlySpeed", {
+    Text = "Fly Speed",
+    Default = 50,
+    Min = 10,
+    Max = 500,
+    Rounding = 0,
+    Callback = function(Value)
+        Settings.FlySpeed = Value
+    end
+})
+
+-- ========================================
+-- TELEPORT TAB
+-- ========================================
+local TPMain = Tabs.Teleport:AddLeftGroupbox("Click Teleport")
+
+TPMain:AddToggle("ClickTP", {
+    Text = "Click Teleport (Hold T + Click)",
+    Default = false,
+    Tooltip = "Hold T and click to teleport to mouse position",
+    Callback = function(Value)
+        Settings.ClickTP = Value
+    end
+})
+
+TPMain:AddLabel("Hold T + Left Click to TP")
+
+local TPLocations = Tabs.Teleport:AddLeftGroupbox("Quick Teleports")
+
+TPLocations:AddButton({
+    Text = "TP to Spawn",
+    Func = function()
+        local pos = FindLocationByName("spawn") or Vector3.new(0, 10, 0)
+        TeleportTo(pos)
+        Library:Notify("Teleported to Spawn!", 2)
+    end
+})
+
+TPLocations:AddButton({
+    Text = "TP to Shop",
+    Func = function()
+        local pos = FindLocationByName("shop")
+        if pos then
+            TeleportTo(pos)
+            Library:Notify("Teleported to Shop!", 2)
+        else
+            Library:Notify("Shop not found!", 2)
+        end
+    end
+})
+
+TPLocations:AddButton({
+    Text = "TP to Nearest Chest",
+    Func = function()
+        local chest, prompt, dist = GetNearestChest()
+        if chest then
+            local pos = chest:IsA("Model") and chest:GetPivot().Position or chest.Position
+            TeleportTo(pos)
+            Library:Notify("Teleported to chest! (" .. math.floor(dist) .. " studs away)", 2)
+        else
+            Library:Notify("No chest found!", 2)
+        end
+    end
+})
+
+TPLocations:AddButton({
+    Text = "TP to Nearest Enemy",
+    Func = function()
+        local mob, dist = GetNearestMob()
+        if mob then
+            local root = mob:FindFirstChild("HumanoidRootPart") or mob.PrimaryPart
+            if root then
+                TeleportTo(root.Position + Vector3.new(0, 0, 5))
+                Library:Notify("Teleported to " .. mob.Name .. "!", 2)
+            end
+        else
+            Library:Notify("No enemy found!", 2)
+        end
+    end
+})
+
+TPLocations:AddButton({
+    Text = "TP to Nearest Boss",
+    Func = function()
+        local boss, dist = GetNearestBoss()
+        if boss then
+            local optPos = GetOptimalBossPosition(boss)
+            if optPos then
+                TeleportTo(optPos)
+                Library:Notify("Teleported to " .. boss.Name .. " (optimal position)!", 2)
+            end
+        else
+            Library:Notify("No boss found!", 2)
+        end
+    end
+})
+
+local TPPlayers = Tabs.Teleport:AddRightGroupbox("Player Teleport")
+
+local function UpdatePlayerList()
+    local list = {}
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            table.insert(list, p.Name)
+        end
+    end
+    return list
+end
+
+TPPlayers:AddDropdown("TPPlayer", {
+    Values = UpdatePlayerList(),
+    Default = 1,
+    Text = "Select Player",
+})
+
+TPPlayers:AddButton({
+    Text = "Teleport to Player",
+    Func = function()
+        local targetName = Options.TPPlayer.Value
+        local target = Players:FindFirstChild(targetName)
+        if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+            TeleportTo(target.Character.HumanoidRootPart.Position)
+            Library:Notify("Teleported to " .. targetName, 2)
+        else
+            Library:Notify("Player not found!", 2)
+        end
+    end
+})
+
+TPPlayers:AddButton({
+    Text = "Refresh Player List",
+    Func = function()
+        Options.TPPlayer:SetValues(UpdatePlayerList())
+        Library:Notify("Player list refreshed!", 1)
+    end
+})
+
+-- ========================================
+-- ESP TAB
+-- ========================================
+local ESPMain = Tabs.ESP:AddLeftGroupbox("ESP Toggles")
+
+ESPMain:AddToggle("ESPEnabled", {
+    Text = "Enable ESP",
+    Default = false,
+    Callback = function(Value)
+        Settings.ESPEnabled = Value
+        if not Value then
+            CleanupESP()
+        end
+    end
+})
+
+ESPMain:AddToggle("ESPPlayers", {
+    Text = "Show Players",
+    Default = false,
+    Callback = function(Value)
+        Settings.ESPPlayers = Value
+    end
+})
+
+ESPMain:AddToggle("ESPMobs", {
+    Text = "Show Mobs/Enemies",
+    Default = false,
+    Callback = function(Value)
+        Settings.ESPMobs = Value
+    end
+})
+
+ESPMain:AddToggle("ESPChests", {
+    Text = "Show Chests/Prompts",
+    Default = false,
+    Callback = function(Value)
+        Settings.ESPChests = Value
+    end
+})
+
+ESPMain:AddToggle("ESPBosses", {
+    Text = "Show Bosses",
+    Default = false,
+    Callback = function(Value)
+        Settings.ESPBosses = Value
+    end
+})
+
+local ESPOptions = Tabs.ESP:AddRightGroupbox("Display Options")
+
+ESPOptions:AddToggle("ESPDistance", {
+    Text = "Show Distance",
+    Default = true,
+    Callback = function(Value)
+        Settings.ESPDistance = Value
+    end
+})
+
+ESPOptions:AddToggle("ESPHealth", {
+    Text = "Show Health",
+    Default = true,
+    Callback = function(Value)
+        Settings.ESPHealth = Value
+    end
+})
+
+ESPOptions:AddToggle("ESPBoxes", {
+    Text = "Show 3D Boxes",
+    Default = false,
+    Callback = function(Value)
+        Settings.ESPBoxes = Value
+    end
+})
+
+ESPOptions:AddToggle("ESPTracers", {
+    Text = "Show Tracers",
+    Default = false,
+    Callback = function(Value)
+        Settings.ESPTracers = Value
+    end
+})
+
+local ESPPerf = Tabs.ESP:AddRightGroupbox("Performance")
+
+ESPPerf:AddSlider("ESPUpdateRate", {
+    Text = "Update Rate (seconds)",
+    Default = 0.5,
+    Min = 0.1,
+    Max = 2,
+    Rounding = 1,
+    Tooltip = "Higher = less lag, lower = smoother",
+    Callback = function(Value)
+        Settings.ESPUpdateRate = Value
+    end
+})
+
+ESPPerf:AddSlider("ESPMaxDistance", {
+    Text = "Max Distance",
+    Default = 500,
+    Min = 100,
+    Max = 2000,
+    Rounding = 0,
+    Tooltip = "Don't show ESP beyond this distance",
+    Callback = function(Value)
+        Settings.ESPMaxDistance = Value
+    end
+})
+
+ESPPerf:AddLabel("Lower distance = better FPS")
+
+-- ========================================
+-- DUNGEON TAB
+-- ========================================
+local DungeonMain = Tabs.Dungeon:AddLeftGroupbox("Dungeon Automation")
+
+DungeonMain:AddToggle("AutoDungeon", {
+    Text = "Auto Clear Room",
+    Default = false,
+    Tooltip = "Automatically kills enemies in current room",
+    Callback = function(Value)
+        Settings.AutoDungeon = Value
+    end
+})
+
+DungeonMain:AddToggle("AutoBoss", {
+    Text = "Auto Kill Boss",
+    Default = false,
+    Tooltip = "Positions at optimal range and attacks boss",
+    Callback = function(Value)
+        Settings.AutoBoss = Value
+    end
+})
+
+DungeonMain:AddSlider("BossAttackRange", {
+    Text = "Boss Attack Range",
+    Default = 8,
+    Min = 3,
+    Max = 20,
+    Rounding = 0,
+    Tooltip = "Distance to stand from boss center",
+    Callback = function(Value)
+        Settings.BossAttackRange = Value
+    end
+})
+
+DungeonMain:AddToggle("AutoOpenGate", {
+    Text = "Auto Open Gate/Door",
+    Default = false,
+    Tooltip = "Opens nearby gates before boss fight",
+    Callback = function(Value)
+        Settings.AutoOpenGate = Value
+    end
+})
+
+DungeonMain:AddToggle("SkipCutscenes", {
+    Text = "Skip Cutscenes",
+    Default = false,
+    Callback = function(Value)
+        Settings.SkipCutscenes = Value
+    end
+})
+
+local DungeonInfo = Tabs.Dungeon:AddRightGroupbox("Dungeon Status")
+
+local dungeonInfoLabel = DungeonInfo:AddLabel("Status: Not in dungeon")
+local enemyCountLabel = DungeonInfo:AddLabel("Enemies: 0")
+local bossHealthLabel = DungeonInfo:AddLabel("Boss HP: N/A")
+local gateLabel = DungeonInfo:AddLabel("Gate Nearby: No")
+
+local function RefreshDungeonStatus()
+    local info = GetDungeonInfo()
+    dungeonInfoLabel:SetText("Status: " .. (info.InDungeon and "In Dungeon" or "Not in dungeon"))
+    enemyCountLabel:SetText("Enemies: " .. info.EnemiesRemaining)
+    bossHealthLabel:SetText("Boss HP: " .. info.BossHealth)
+    gateLabel:SetText("Gate Nearby: " .. (info.GateNearby and "Yes" or "No"))
+end
+
+DungeonInfo:AddButton({
+    Text = "Refresh Dungeon Info",
+    Func = RefreshDungeonStatus
+})
+
+-- Auto-refresh dungeon status every 2 seconds
+task.spawn(function()
+    while task.wait(2) do
+        pcall(RefreshDungeonStatus)
+    end
+end)
+
+DungeonInfo:AddButton({
+    Text = "TP to Boss Door",
+    Func = function()
+        local doorPos = GetBossDoorPosition()
+        if doorPos then
+            TeleportTo(doorPos)
+            Library:Notify("Teleported to boss door area!", 2)
+        else
+            local gate, prompt, dist = GetNearestGate(100, false)
+            if gate then
+                local pos = gate:IsA("BasePart") and gate.Position or gate:GetPivot().Position
+                TeleportTo(pos)
+                Library:Notify("Teleported to gate!", 2)
+            else
+                Library:Notify("No gate/door found!", 2)
+            end
+        end
+    end
+})
+
+-- ========================================
+-- MISC TAB
+-- ========================================
+local MiscMain = Tabs.Misc:AddLeftGroupbox("Quality of Life")
+
+MiscMain:AddToggle("AntiAFK", {
+    Text = "Anti AFK",
+    Default = true,
+    Callback = function(Value)
+        Settings.AntiAFK = Value
+    end
+})
+
+MiscMain:AddToggle("FPSBoost", {
+    Text = "FPS Boost",
+    Default = false,
+    Tooltip = "Reduces graphics for better performance",
+    Callback = function(Value)
+        Settings.FPSBoost = Value
+        if Value then
+            settings().Rendering.QualityLevel = 1
+            for _, v in pairs(Workspace:GetDescendants()) do
+                if v:IsA("ParticleEmitter") or v:IsA("Trail") then
+                    v.Enabled = false
+                end
+                if v:IsA("Decal") and not v.Parent:IsA("Humanoid") then
+                    v.Transparency = 1
+                end
+            end
+            Library:Notify("FPS Boost enabled!", 2)
+        else
+            settings().Rendering.QualityLevel = 10
+            Library:Notify("FPS Boost disabled!", 2)
+        end
+    end
+})
+
+local CodesBox = Tabs.Misc:AddLeftGroupbox("Codes")
+
+CodesBox:AddInput("CodeInput", {
+    Default = "",
+    Placeholder = "Enter code here...",
+    Numeric = false,
+    Text = "Code",
+})
+
+CodesBox:AddButton({
+    Text = "Redeem Code",
+    Func = function()
+        local code = Options.CodeInput.Value
+        if code and code ~= "" then
+            local codesService = Remotes.Codes
+            if codesService then
+                local redeemRemote = codesService:FindFirstChild("RedeemCode")
+                if redeemRemote and redeemRemote:IsA("RemoteFunction") then
+                    local success, result = pcall(function()
+                        return redeemRemote:InvokeServer(code)
+                    end)
+                    if success then
+                        Library:Notify("Result: " .. tostring(result), 3)
+                    else
+                        Library:Notify("Failed: " .. tostring(result), 3)
+                    end
+                else
+                    Library:Notify("RedeemCode remote not found!", 2)
+                end
+            else
+                Library:Notify("Codes service not found!", 2)
+            end
+        end
+    end
+})
+
+local MiscButtons = Tabs.Misc:AddRightGroupbox("Actions")
+
+MiscButtons:AddButton({
+    Text = "Rejoin Server",
+    Func = function()
+        game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, game.JobId)
+    end
+})
+
+MiscButtons:AddButton({
+    Text = "Copy Server Link",
+    Func = function()
+        if setclipboard then
+            setclipboard("roblox://placeId=" .. game.PlaceId .. "&gameInstanceId=" .. game.JobId)
+            Library:Notify("Server link copied!", 2)
+        end
+    end
+})
+
+MiscButtons:AddButton({
+    Text = "Reset Character",
+    Func = function()
+        local hum = GetHumanoid()
+        if hum then hum.Health = 0 end
+    end
+})
+
+-- ========================================
+-- SETTINGS TAB
+-- ========================================
+local MenuGroup = Tabs.Settings:AddLeftGroupbox("Menu Settings")
+
+MenuGroup:AddButton({
+    Text = "Unload Script",
+    Func = function()
+        CleanupESP()
+        Library:Unload()
+    end
+})
+
+MenuGroup:AddLabel("Menu Keybind"):AddKeyPicker("MenuKeybind", {
+    Default = "RightControl",
+    NoUI = true,
+    Text = "Menu Toggle"
+})
+
+Library.ToggleKeybind = Options.MenuKeybind
+
+local InfoGroup = Tabs.Settings:AddRightGroupbox("Anti-Cheat Info")
+
+InfoGroup:AddLabel("hookmetamethod: " .. (hookmetamethod and "Yes" or "No"))
+InfoGroup:AddLabel("getnamecallmethod: " .. (getnamecallmethod and "Yes" or "No"))
+InfoGroup:AddLabel("firetouchinterest: " .. (firetouchinterest and "Yes" or "No"))
+InfoGroup:AddLabel("fireproximityprompt: " .. (fireproximityprompt and "Yes" or "No"))
+InfoGroup:AddLabel("")
+InfoGroup:AddLabel("Hooks Active: " .. (HooksEnabled and "YES" or "NO"))
+InfoGroup:AddLabel("")
+InfoGroup:AddLabel("Script works without hooks!")
+InfoGroup:AddLabel("Hooks just add extra protection.")
+
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({"MenuKeybind"})
+
+ThemeManager:SetFolder("CrshHub")
+SaveManager:SetFolder("CrshHub/SoloHunter")
+
+SaveManager:BuildConfigSection(Tabs.Settings)
+ThemeManager:ApplyToTab(Tabs.Settings)
+
+-- ========================================
+-- MAIN LOOPS
+-- ========================================
+
+-- Anti-AFK
+local VirtualUser = game:GetService("VirtualUser")
+LocalPlayer.Idled:Connect(function()
+    if Settings.AntiAFK then
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end
+end)
+
+-- Noclip Loop
+RunService.Stepped:Connect(function()
+    if Settings.Noclip then
+        local char = GetCharacter()
+        if char then
+            for _, part in pairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
+                end
+            end
+        end
+    end
+end)
+
+-- Infinite Jump
+UserInputService.JumpRequest:Connect(function()
+    if Settings.InfiniteJump then
+        local hum = GetHumanoid()
+        if hum then
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+    end
+end)
+
+-- Fly System
+local flyActive = false
+local flyBV, flyBG
+
+RunService.RenderStepped:Connect(function()
+    if Settings.FlyEnabled then
+        local root = GetHumanoidRootPart()
+        local hum = GetHumanoid()
+        if not root or not hum then return end
+        
+        if not flyActive then
+            flyActive = true
+            hum.PlatformStand = true
+            
+            flyBV = Instance.new("BodyVelocity")
+            flyBV.Name = "FlyBV"
+            flyBV.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+            flyBV.Velocity = Vector3.new(0, 0, 0)
+            flyBV.Parent = root
+            
+            flyBG = Instance.new("BodyGyro")
+            flyBG.Name = "FlyBG"
+            flyBG.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+            flyBG.P = 9e4
+            flyBG.Parent = root
+        end
+        
+        local speed = Settings.FlySpeed
+        local direction = Vector3.new()
+        
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+            direction = direction + Camera.CFrame.LookVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+            direction = direction - Camera.CFrame.LookVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+            direction = direction - Camera.CFrame.RightVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+            direction = direction + Camera.CFrame.RightVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+            direction = direction + Vector3.new(0, 1, 0)
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+            direction = direction - Vector3.new(0, 1, 0)
+        end
+        
+        flyBV.Velocity = direction * speed
+        flyBG.CFrame = Camera.CFrame
+    elseif flyActive then
+        flyActive = false
+        local hum = GetHumanoid()
+        if hum then hum.PlatformStand = false end
+        if flyBV then flyBV:Destroy() end
+        if flyBG then flyBG:Destroy() end
+    end
+end)
+
+-- Click TP
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if Settings.ClickTP and input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if UserInputService:IsKeyDown(Enum.KeyCode.T) then
+            local root = GetHumanoidRootPart()
+            if root then
+                local mouse = LocalPlayer:GetMouse()
+                if mouse.Hit then
+                    root.CFrame = CFrame.new(mouse.Hit.Position + Vector3.new(0, 3, 0))
+                end
+            end
+        end
+    end
+end)
+
+-- Anti Stun & Stats
+RunService.Heartbeat:Connect(function()
+    local char = GetCharacter()
+    if not char then return end
+    
+    if Settings.AntiStun then
+        pcall(function()
+            char:SetAttribute("Stunned", false)
+            char:SetAttribute("ElementalStunned", false)
+        end)
+    end
+    
+    if Settings.InfiniteMana then
+        local hum = GetHumanoid()
+        if hum then
+            pcall(function()
+                hum:SetAttribute("Mana", 100)
+            end)
+        end
+    end
+    
+    if Settings.GodMode then
+        local hum = GetHumanoid()
+        if hum then
+            hum.Health = hum.MaxHealth
+        end
+    end
+end)
+
+-- Maintain Speed/Jump
+RunService.Heartbeat:Connect(function()
+    local hum = GetHumanoid()
+    if hum then
+        if Settings.WalkSpeed > 16 then
+            hum.WalkSpeed = Settings.WalkSpeed
+        end
+        if Settings.JumpPower > 50 then
+            hum.JumpPower = Settings.JumpPower
+        end
+    end
+end)
+
+-- Auto Farm Loop
+task.spawn(function()
+    while task.wait(0.1) do
+        if Settings.AutoFarm then
+            local mob = GetNearestMob(Settings.FarmRadius)
+            if mob then
+                local root = mob:FindFirstChild("HumanoidRootPart") or mob.PrimaryPart
+                if root then
+                    local myRoot = GetHumanoidRootPart()
+                    if myRoot then
+                        myRoot.CFrame = root.CFrame * CFrame.new(0, 0, 3)
+                    end
+                end
+            end
+        end
+        
+        if Settings.AutoDungeon then
+            local mob = GetNearestMob(500)
+            if mob then
+                local root = mob:FindFirstChild("HumanoidRootPart") or mob.PrimaryPart
+                if root then
+                    TeleportTo(root.Position + Vector3.new(0, 0, 3))
+                end
+            end
+        end
+        
+        if Settings.AutoBoss then
+            local boss = GetNearestBoss(500)
+            if boss then
+                local optPos = GetOptimalBossPosition(boss)
+                if optPos then
+                    TeleportTo(optPos)
+                end
+            end
+        end
+        
+        if Settings.AutoOpenGate and Settings.AutoBoss then
+            -- Check if boss exists but we're far from it (blocked by door)
+            local boss, bossDist = GetNearestBoss(500)
+            if boss and bossDist and bossDist > 50 then
+                -- We're far from boss, try to get to the door area
+                local doorPos = GetBossDoorPosition()
+                if doorPos then
+                    TeleportTo(doorPos)
+                    task.wait(0.5)
+                end
+            end
+        end
+    end
+end)
+
+-- Auto Chest Loop (Improved with hold)
+task.spawn(function()
+    local isOpening = false
+    while task.wait(0.3) do
+        if Settings.AutoChest and not isOpening then
+            local chest, prompt, dist = GetNearestChest(Settings.ChestRadius)
+            if prompt and dist < 20 then
+                isOpening = true
+                -- TP to chest first
+                local chestPos = chest:IsA("Model") and chest:GetPivot().Position or chest.Position
+                TeleportTo(chestPos)
+                task.wait(0.2)
+                -- Hold the prompt
+                HoldProximityPrompt(prompt, Settings.ChestHoldTime)
+                isOpening = false
+            end
+        end
+    end
+end)
+
+-- Auto Collect Drops
+task.spawn(function()
+    while task.wait(0.2) do
+        if Settings.AutoCollectDrops then
+            local root = GetHumanoidRootPart()
+            if root then
+                local drops = GetAllDrops()
+                for _, drop in pairs(drops) do
+                    local pos = drop:IsA("Model") and drop:GetPivot().Position or drop.Position
+                    local dist = (root.Position - pos).Magnitude
+                    if dist < Settings.DropRadius then
+                        if firetouchinterest then
+                            local part = drop:IsA("Model") and drop.PrimaryPart or drop
+                            if part then
+                                firetouchinterest(root, part, 0)
+                                task.wait()
+                                firetouchinterest(root, part, 1)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- Auto Attack Loop
+task.spawn(function()
+    while task.wait(Settings.AttackSpeed) do
+        if Settings.AutoAttack then
+            local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+            if tool then
+                tool:Activate()
+            end
+        end
+    end
+end)
+
+-- Auto Skill Loop
+task.spawn(function()
+    while task.wait(Settings.SkillDelay) do
+        if Settings.AutoSkill then
+            for slot, enabled in pairs(Settings.SkillSlots) do
+                if enabled then
+                    FireSkill(slot)
+                    task.wait(0.1)
+                end
+            end
+        end
+        
+        if Settings.FireAnySkill then
+            FireSkill(Settings.SelectedSkill)
+        end
+    end
+end)
+
+-- Aim Lock / Face Target
+task.spawn(function()
+    while task.wait(0.1) do
+        if Settings.AimLock then
+            local mob = GetNearestMob(100) or GetNearestBoss(100)
+            if mob then
+                local root = mob:FindFirstChild("HumanoidRootPart") or mob.PrimaryPart
+                local myRoot = GetHumanoidRootPart()
+                if root and myRoot then
+                    myRoot.CFrame = CFrame.new(myRoot.Position, Vector3.new(root.Position.X, myRoot.Position.Y, root.Position.Z))
+                end
+            end
+        end
+    end
+end)
+
+-- ESP Update Loop (Optimized)
+task.spawn(function()
+    while task.wait(Settings.ESPUpdateRate) do
+        if not Settings.ESPEnabled then
+            continue
+        end
+        
+        UpdateEntityCache()
+        
+        -- Update player ESP
+        if Settings.ESPPlayers then
+            for _, player in pairs(Players:GetPlayers()) do
+                if player ~= LocalPlayer and player.Character then
+                    local key = "player_" .. player.UserId
+                    if not ESPObjects[key] then
+                        ESPObjects[key] = {
+                            Object = player.Character,
+                            Box = CreateESPBox(Settings.PlayerColor),
+                            Text = CreateESPText(Settings.PlayerColor),
+                            Tracer = CreateESPTracer(Settings.PlayerColor),
+                        }
+                    end
+                    ESPObjects[key].Object = player.Character
+                    if not UpdateESPForObject(player.Character, ESPObjects[key]) then
+                        ESPObjects[key] = nil
+                    end
+                end
+            end
+        end
+        
+        -- Update mob ESP (using cache)
+        if Settings.ESPMobs then
+            for _, mobData in pairs(CachedMobs) do
+                local mob = mobData.Model
+                local key = "mob_" .. tostring(mob:GetFullName())
+                if not ESPObjects[key] then
+                    ESPObjects[key] = {
+                        Object = mob,
+                        Box = CreateESPBox(Settings.MobColor),
+                        Text = CreateESPText(Settings.MobColor),
+                        Tracer = CreateESPTracer(Settings.MobColor),
+                    }
+                end
+                if not UpdateESPForObject(mob, ESPObjects[key]) then
+                    ESPObjects[key] = nil
+                end
+            end
+        end
+        
+        -- Update boss ESP (using cache)
+        if Settings.ESPBosses then
+            for _, bossData in pairs(CachedBosses) do
+                local boss = bossData.Model
+                local key = "boss_" .. boss.Name
+                if not ESPObjects[key] then
+                    ESPObjects[key] = {
+                        Object = boss,
+                        Box = CreateESPBox(Settings.BossColor),
+                        Text = CreateESPText(Settings.BossColor),
+                        Tracer = CreateESPTracer(Settings.BossColor),
+                    }
+                end
+                if not UpdateESPForObject(boss, ESPObjects[key]) then
+                    ESPObjects[key] = nil
+                end
+            end
+        end
+    end
+end)
+
+-- Cutscene Skipper
+task.spawn(function()
+    local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+    
+    local function TrySkipCutscene(desc)
+        if not Settings.SkipCutscenes then return end
+        
+        local name = desc.Name:lower()
+        local shouldSkip = name:find("cutscene") or name:find("cinematic") or 
+                          name:find("intro") or name:find("dialogue") or 
+                          name:find("story") or name:find("sequence")
+        
+        if shouldSkip then
+            task.wait(0.3)
+            pcall(function() 
+                if desc:IsA("ScreenGui") then
+                    desc.Enabled = false
+                elseif desc:IsA("GuiObject") then
+                    desc.Visible = false
+                end
+            end)
+            -- Try to find and click skip buttons
+            pcall(function()
+                for _, child in pairs(desc:GetDescendants()) do
+                    if child:IsA("TextButton") or child:IsA("ImageButton") then
+                        local btnName = child.Name:lower()
+                        local btnText = child:IsA("TextButton") and child.Text:lower() or ""
+                        if btnName:find("skip") or btnText:find("skip") then
+                            -- Simulate click
+                            if child.Activated then
+                                child.Activated:Fire()
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end
+    
+    PlayerGui.DescendantAdded:Connect(TrySkipCutscene)
+    
+    -- Also check existing GUIs
+    for _, gui in pairs(PlayerGui:GetDescendants()) do
+        TrySkipCutscene(gui)
+    end
+end)
+
+-- Character respawn handler
+LocalPlayer.CharacterAdded:Connect(function(char)
+    task.wait(1)
+    local hum = char:WaitForChild("Humanoid", 5)
+    if hum then
+        if Settings.WalkSpeed > 16 then
+            hum.WalkSpeed = Settings.WalkSpeed
+        end
+        if Settings.JumpPower > 50 then
+            hum.JumpPower = Settings.JumpPower
+        end
+    end
+end)
+
+Library:Notify("Crsh Hub | Solo Hunters loaded!", 5)
+if HooksEnabled then
+    Library:Notify("Alr", 3)
+else
+    Library:Notify("...", 3)
+end
