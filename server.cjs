@@ -13,10 +13,10 @@ const MONGO_URI = process.env.MONGO_URI;
 const LINKVERTISE_KEY_HOURS = 24; // How long keys from Linkvertise last (hours)
 
 // Script Files
-const FILE_HEADLESS = 'headless.lua';
-const FILE_NORMAL = 'read.lua';
-const FILE_SAFE = 'safe.lua';
-const FILE_CHAINSAW = 'chainsaw.lua';
+const FILE_HEADLESS = 'headless';
+const FILE_NORMAL = 'read';
+const FILE_SAFE = 'safe';
+const FILE_CHAINSAW = 'chainsaw';
 const FILE_SOLO = 'Solo';
 
 // --- MONGODB CONNECTION ---
