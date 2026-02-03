@@ -103,9 +103,15 @@ app.post('/api/reset', requireAuth, async (req, res) => {
 app.post('/api/delete', requireAuth, async (req, res) => {
     try {
         const { key } = req.body;
-        await Key.findOneAndDelete({ key: key });
+        if (!key) return res.status(400).json({ error: "No key provided" });
+        const result = await Key.findOneAndDelete({ key: key });
+        if (!result) return res.status(404).json({ error: "Key not found: " + key });
+        console.log("[DELETE] Deleted key:", key);
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { 
+        console.error("[DELETE ERROR]", e);
+        res.status(500).json({ error: e.message }); 
+    }
 });
 
 // 5. Update Note
